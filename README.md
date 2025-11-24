@@ -77,6 +77,25 @@ Built-in native capabilities available in every Pytron window.
 - `system_open_file(file_types)` — Open a native file selection dialog.
 - `system_save_file(save_filename, file_types)` — Open a native save file dialog.
 
+### Reactive State
+Pytron provides a built-in `state` object that syncs automatically from Python to JavaScript. 
+**Python:**
+```python
+app.state.username = "Alice"
+app.state.score = 100
+```
+
+**JavaScript:**
+```js
+// Access current value
+console.log(pytron.state.username);
+
+// Listen for specific changes
+pytron.on('state:score', (newScore) => {
+console.log(`New score: ${newScore}`);
+});
+```
+
 ### General Backend RPC
 
 - Any other property accessed on the `pytron` object will behave as an async function that calls the backend with the same name and arguments. For example, `pytron.ping()` will attempt to call a `ping` function on the backend and return its result.

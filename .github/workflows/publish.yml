@@ -1,0 +1,33 @@
+name: Publish to npm 📦
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    # 🚨 REQUIRED: This permission allows the OIDC handshake
+    permissions:
+      contents: read
+      id-token: write 
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          # We do NOT set an auth token here anymore
+
+      - run: npm ci
+        # 'npm ci' is cleaner than 'npm install' for CI/CD
+
+      - run: npm run build
+
+      # 🚨 The Magic Line
+      # --provenance is what triggers the OIDC verification
+      - run: npm publish --provenance --access public

@@ -46,7 +46,7 @@ Notes:
 
 ## API Reference
 
-Window management helpers
+### Window Management
 
 - `minimize()` — Minimize the current window.
 - `maximize()` — Maximize the current window.
@@ -56,11 +56,32 @@ Window management helpers
 - `move(x, y)` — Move the window to the coordinate (`x`, `y`).
 - `destroy()` — Close/destroy the window.
 
-General backend RPC
+### Event System (IPC)
+
+Listen for events sent from the Python backend (using `window.emit('event_name', data)`).
+
+- `on(event, callback)` — Register a listener for an event.
+- `off(event, callback)` — Remove a listener.
+
+```js
+pytron.on('download-progress', (data) => {
+  console.log(`Download at ${data.percent}%`);
+});
+```
+
+### System API
+
+Built-in native capabilities available in every Pytron window.
+
+- `system_notification(title, message)` — Show a system notification.
+- `system_open_file(file_types)` — Open a native file selection dialog.
+- `system_save_file(save_filename, file_types)` — Open a native save file dialog.
+
+### General Backend RPC
 
 - Any other property accessed on the `pytron` object will behave as an async function that calls the backend with the same name and arguments. For example, `pytron.ping()` will attempt to call a `ping` function on the backend and return its result.
 
-Behavior and errors
+### Behavior and Errors
 
 - Calls return a Promise and throw/reject if the backend bridge is not available or the backend reports an error.
 - Errors include helpful messages when a method is missing or the runtime bridge is not connected.
@@ -76,7 +97,7 @@ npm run dev
 
 Then import `pytron` in your frontend code and use the window API as shown above.
 
-## Implementation notes
+## Implementation Notes
 
 - The package is shipped as a single ESM entrypoint at `package/index.js` for easy bundling with modern toolchains (Vite, Rollup, Webpack).
 - At runtime `pytron` forwards calls to the native/backend bridge provided by the host; this is intentionally abstracted so consumers can think in terms of a module API rather than transport details.
@@ -86,7 +107,7 @@ Then import `pytron` in your frontend code and use the window API as shown above
 - Entrypoint: `package/index.js`.
 - To run the example app, use the Vite frontend example above.
 
-Contributing
+## Contributing
 
 - Open issues or PRs at `https://github.com/Ghua8088/pytron-client`.
 
@@ -102,11 +123,3 @@ This project is licensed under the ISC License — see `package/package.json` fo
 ## Maintainers
 
 - `Ghua8088`
-
----
-
-Would you like me to also:
-- Add a tiny standalone HTML example that demonstrates the window API, or
-- Update the example project's `README.md` with specific steps showing `pytron` calls?
-
-

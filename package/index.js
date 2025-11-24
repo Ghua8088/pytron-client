@@ -27,5 +27,4 @@ const pytron = new Proxy({}, {
         };
     }
 });
-
 export default pytron;

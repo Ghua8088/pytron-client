@@ -106,18 +106,32 @@ const pytron = new Proxy({
 // Internal dispatcher called by Python
 if (typeof window !== 'undefined') {
     window.__pytron_dispatch = (event, data) => {
-        // Handle internal state updates automatically
-        if (event === 'pytron:state-update') {
-            state[data.key] = data.value;
-            // We also re-emit it as a generic event so users can subscribe to specific keys if they want
-            // e.g. pytron.on('state:username', ...)
-            if (listeners[`state:${data.key}`]) {
-                listeners[`state:${data.key}`].forEach(cb => cb(data.value));
+        // If Python sent a JSON string payload (we send the payload as a JSON string
+        // to avoid JS injection), try to parse it back to an object/value.
+        let payload = data;
+        if (typeof data === 'string') {
+            try {
+                payload = JSON.parse(data);
+            } catch (e) {
+                // Not JSON — leave as-is
+                payload = data;
             }
         }
 
+        // Handle internal state updates automatically
+        if (event === 'pytron:state-update') {
+            if (payload && typeof payload === 'object' && 'key' in payload) {
+                state[payload.key] = payload.value;
+                // Re-emit as a specific key event
+                if (listeners[`state:${payload.key}`]) {
+                    listeners[`state:${payload.key}`].forEach(cb => cb(payload.value));
+                }
+            }
+        }
+
+        // Dispatch to listeners with the parsed payload
         if (listeners[event]) {
-            listeners[event].forEach(cb => cb(data));
+            listeners[event].forEach(cb => cb(payload));
         }
     };
 }

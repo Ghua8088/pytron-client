@@ -55,8 +55,12 @@ const pytron = new Proxy({
      * Wait for the backend to be connected.
      * @param {number} timeout - Timeout in milliseconds.
      */
-    waitForBackend: async (timeout = 5000) => {
-        return waitFor(() => typeof window !== 'undefined' && window.pywebview && window.pywebview.api, timeout);
+    waitForBackend: async (timeout = 10000) => {
+        // Wait for pywebview to be injected
+        await waitFor(() => typeof window !== 'undefined' && window.pywebview, timeout);
+        
+        // Wait for api to be populated (sometimes takes a moment after injection)
+        return waitFor(() => window.pywebview.api && Object.keys(window.pywebview.api).length > 0, timeout);
     },
 
     /**
@@ -90,6 +94,7 @@ const pytron = new Proxy({
             }
 
             if (typeof window.pywebview.api[prop] !== 'function') {
+                console.error(`[Pytron] Method '${String(prop)}' not found on backend. Available methods:`, Object.keys(window.pywebview.api));
                 throw new Error(`Method '${String(prop)}' not found on Pytron backend.`);
             }
 

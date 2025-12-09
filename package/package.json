@@ -2,6 +2,7 @@
     "name": "pytron-client",
     "version": "0.1.6",
     "description": "Client library for Pytron",
+    "type": "module",
     "main": "index.js",
     "types": "index.d.ts",
     "scripts": {

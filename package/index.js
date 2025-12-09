@@ -1,144 +1,141 @@
 /**
- * Pytron Client Library
- * Provides a seamless bridge to the Python backend.
+ * Pytron Client Library (Final Stable Version)
  */
 
-// Event storage
-const listeners = {};
-
-// Local state cache
+// 1. LOCAL STATE
 const state = {};
 
-// Helper to wait for a condition
-const waitFor = (condition, timeout = 5000) => {
+// 2. BACKEND READINESS CHECK
+const isBackendReady = () => {
+    // Priority: Check the injected flag
+    if (window.pytron && window.pytron.is_ready) return true;
+
+    // Fallback: Check for a known bound function
+    const hasClose = typeof window.pytron_close === 'function';
+    const hasDrag = typeof window.pytron_drag === 'function';
+
+    // DEBUG LOG ONLY (Remove in prod if needed, but useful now)
+    // console.log(`[Pytron Debug] Checking Backend: ready=${window.pytron?.is_ready}, hasClose=${hasClose}, hasDrag=${hasDrag}`);
+
+    return typeof window !== 'undefined' && (hasClose || hasDrag);
+};
+
+// 3. WAIT LOGIC (Standalone Function)
+const waitForBackend = (timeout = 3000) => {
     return new Promise((resolve, reject) => {
-        if (condition()) return resolve();
+        if (isBackendReady()) return resolve();
 
         const start = Date.now();
         const interval = setInterval(() => {
-            if (condition()) {
+            if (isBackendReady()) {
                 clearInterval(interval);
                 resolve();
             } else if (Date.now() - start > timeout) {
                 clearInterval(interval);
-                reject(new Error("Timeout waiting for condition"));
+                console.warn("[Pytron] Backend wait timed out.");
+                resolve(); // resolve anyway to let the call proceed and fail naturally
             }
-        }, 100);
+        }, 50);
     });
 };
 
-// The main Pytron Proxy
-const pytron = new Proxy({
-    state: state, // Expose state object directly
+// 4. EVENT LISTENERS
+const eventWrappers = new Map();
 
-    /**
-     * Listen for an event sent from the Python backend.
-     * @param {string} event - The event name.
-     * @param {function} callback - The function to call when event triggers.
-     */
+// 5. PUBLIC API OBJECT (The "Real" Object)
+// We define the API explicitly first.
+const pytronApi = {
+    state: state,
+
+    // Expose the wait function directly
+    waitForBackend: waitForBackend,
+
     on: (event, callback) => {
-        if (!listeners[event]) listeners[event] = [];
-        listeners[event].push(callback);
+        const wrapper = (e) => callback(e.detail !== undefined ? e.detail : e);
+        if (!eventWrappers.has(callback)) eventWrappers.set(callback, wrapper);
+        window.addEventListener(event, wrapper);
     },
 
-    /**
-     * Remove an event listener.
-     * @param {string} event - The event name.
-     * @param {function} callback - The function to remove.
-     */
     off: (event, callback) => {
-        if (!listeners[event]) return;
-        listeners[event] = listeners[event].filter(cb => cb !== callback);
+        const wrapper = eventWrappers.get(callback);
+        if (wrapper) {
+            window.removeEventListener(event, wrapper);
+            eventWrappers.delete(callback);
+        }
     },
 
-    /**
-     * Wait for the backend to be connected.
-     * @param {number} timeout - Timeout in milliseconds.
-     */
-    waitForBackend: async (timeout = 10000) => {
-        // Wait for pywebview to be injected
-        await waitFor(() => typeof window !== 'undefined' && window.pywebview, timeout);
-        
-        // Wait for api to be populated (sometimes takes a moment after injection)
-        return waitFor(() => window.pywebview.api && Object.keys(window.pywebview.api).length > 0, timeout);
-    },
-
-    /**
-     * Log a message to the Python console (if supported).
-     * @param {string} message - The message to log.
-     */
     log: async (message) => {
         console.log(`[Pytron Client] ${message}`);
-        // Try to send to backend if available, but don't fail
-        if (typeof window !== 'undefined' && window.pywebview && window.pywebview.api && window.pywebview.api.log) {
-            try {
-                await window.pywebview.api.log(message);
-            } catch (e) { /* ignore */ }
+        const logFunc = window.pytron_log || window.log;
+        if (typeof logFunc === 'function') {
+            try { await logFunc(message); } catch (e) { /* ignore */ }
         }
     }
-}, {
-    get: (target, prop) => {
-        // Return local methods/properties if they exist
-        if (prop in target) return target[prop];
+};
 
-        // Otherwise, proxy to the backend
+// 6. THE PROXY (Only for dynamic Python calls)
+const pytron = new Proxy(pytronApi, {
+    get: (target, prop) => {
+        // A. Local Method Check (Priority)
+        // If the property exists on our defined API object, return it immediately.
+        if (prop in target) {
+            return target[prop];
+        }
+
+        // B. Ignore React/System Symbols
+        if (typeof prop === 'symbol' || prop === 'then' || prop === 'toJSON') {
+            return undefined;
+        }
+
+        // C. Python Bridge (Dynamic Wrapper)
         return async (...args) => {
-            // Auto-wait for backend if not ready
-            if (typeof window === 'undefined' || !window.pywebview || !window.pywebview.api) {
+
+            // 1. Wait for Backend (Using the standalone function)
+            if (!isBackendReady()) {
+                await waitForBackend(2000);
+            }
+
+            // 2. Execute Python Function
+            const internalName = `pytron_${String(prop)}`; // e.g. pytron_minimize
+            const directName = String(prop);                // e.g. greet
+
+            // Try Internal (pytron_*)
+            if (typeof window[internalName] === 'function') {
                 try {
-                    await target.waitForBackend(2000); // Wait up to 2s automatically
-                } catch (e) {
-                    console.warn(`[Pytron] Backend not connected. Call to '${String(prop)}' failed.`);
-                    throw new Error("Pytron backend not connected");
+                    return await window[internalName](...args);
+                } catch (err) {
+                    console.error(`[Pytron] Internal error '${internalName}':`, err);
+                    throw err;
                 }
             }
 
-            if (typeof window.pywebview.api[prop] !== 'function') {
-                console.error(`[Pytron] Method '${String(prop)}' not found on backend. Available methods:`, Object.keys(window.pywebview.api));
-                throw new Error(`Method '${String(prop)}' not found on Pytron backend.`);
+            // Try Direct
+            if (typeof window[directName] === 'function') {
+                try {
+                    return await window[directName](...args);
+                } catch (err) {
+                    console.error(`[Pytron] Python error '${directName}':`, err);
+                    throw err;
+                }
             }
 
-            try {
-                return await window.pywebview.api[prop](...args);
-            } catch (error) {
-                console.error(`[Pytron] Error calling '${String(prop)}':`, error);
-                throw error;
-            }
+            // 3. Not Found
+            console.warn(`[Pytron] Method '${String(prop)}' not found.`);
+            throw new Error(`Method '${String(prop)}' not found.`);
         };
     }
 });
 
-// Internal dispatcher called by Python
+// Setup State Listener
 if (typeof window !== 'undefined') {
-    window.__pytron_dispatch = (event, data) => {
-        // If Python sent a JSON string payload (we send the payload as a JSON string
-        // to avoid JS injection), try to parse it back to an object/value.
-        let payload = data;
-        if (typeof data === 'string') {
-            try {
-                payload = JSON.parse(data);
-            } catch (e) {
-                // Not JSON — leave as-is
-                payload = data;
-            }
+    window.addEventListener('pytron:state-update', (e) => {
+        const payload = e.detail;
+        if (payload && typeof payload === 'object' && 'key' in payload) {
+            state[payload.key] = payload.value;
+            const specificEvent = new CustomEvent(`state:${payload.key}`, { detail: payload.value });
+            window.dispatchEvent(specificEvent);
         }
-
-        // Handle internal state updates automatically
-        if (event === 'pytron:state-update') {
-            if (payload && typeof payload === 'object' && 'key' in payload) {
-                state[payload.key] = payload.value;
-                // Re-emit as a specific key event
-                if (listeners[`state:${payload.key}`]) {
-                    listeners[`state:${payload.key}`].forEach(cb => cb(payload.value));
-                }
-            }
-        }
-
-        // Dispatch to listeners with the parsed payload
-        if (listeners[event]) {
-            listeners[event].forEach(cb => cb(payload));
-        }
-    };
+    });
 }
 
 export default pytron;

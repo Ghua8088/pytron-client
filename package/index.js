@@ -132,8 +132,40 @@ if (typeof window !== 'undefined') {
         const payload = e.detail;
         if (payload && typeof payload === 'object' && 'key' in payload) {
             state[payload.key] = payload.value;
+
+            // 1. Dispatch specific event for the key
             const specificEvent = new CustomEvent(`state:${payload.key}`, { detail: payload.value });
             window.dispatchEvent(specificEvent);
+
+            // 2. Dispatch legacy 'pytron:state' event with full state for components listening to everything
+            const legacyEvent = new CustomEvent('pytron:state', { detail: { ...state } });
+            window.dispatchEvent(legacyEvent);
+        }
+    });
+
+    // Capture Global Errors
+    window.addEventListener('error', (event) => {
+        const errorData = {
+            message: event.message,
+            source: event.filename,
+            lineno: event.lineno,
+            colno: event.colno,
+            stack: event.error ? event.error.stack : ''
+        };
+        if (typeof window.pytron_report_error === 'function') {
+            window.pytron_report_error(errorData).catch(() => { });
+        }
+    });
+
+    // Capture Unhandled Promise Rejections
+    window.addEventListener('unhandledrejection', (event) => {
+        const errorData = {
+            message: event.reason ? String(event.reason) : 'Unhandled Promise Rejection',
+            source: 'Promise',
+            stack: event.reason && event.reason.stack ? event.reason.stack : ''
+        };
+        if (typeof window.pytron_report_error === 'function') {
+            window.pytron_report_error(errorData).catch(() => { });
         }
     });
 }

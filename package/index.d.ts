@@ -40,6 +40,12 @@ export interface PytronClient extends PytronAPI {
      * @param message - The message to log.
      */
     log(message: string): Promise<void>;
+
+    /**
+     * Resolve a pytron:// asset to a Data URI.
+     * @param key - The asset key.
+     */
+    asset(key: string): Promise<string | null>;
 }
 
 declare const pytron: PytronClient;

@@ -50,6 +50,27 @@ const pytronApi = {
     // Expose the wait function directly
     waitForBackend: waitForBackend,
 
+    // 4.1 Event Bus (Pub/Sub)
+    events: {
+        listeners: {},
+        on(event, callback) {
+            if (!this.listeners[event]) this.listeners[event] = [];
+            this.listeners[event].push(callback);
+        },
+        off(event, callback) {
+            if (!this.listeners[event]) return;
+            this.listeners[event] = this.listeners[event].filter(cb => cb !== callback);
+        },
+        // internal use
+        emit(event, data) {
+            if (this.listeners[event]) {
+                this.listeners[event].forEach(cb => {
+                    try { cb(data); } catch (e) { console.error("[Pytron Event Error]", e); }
+                });
+            }
+        }
+    },
+
     on: (event, callback) => {
         const wrapper = (e) => callback(e.detail !== undefined ? e.detail : e);
         if (!eventWrappers.has(callback)) eventWrappers.set(callback, wrapper);
@@ -137,6 +158,98 @@ if (typeof window !== 'undefined' && !window.__pytron_fetch_interceptor_active) 
     window.__pytron_fetch_interceptor_active = true;
 }
 
+// 6.1 DOM OBSERVER (Automatic Image/Script/Link Injection)
+// Handles <img src="pytron://..."> automatically.
+if (typeof window !== 'undefined' && !window.__pytron_dom_observer_active) {
+    const getPytronKey = (url) => {
+        if (!url || typeof url !== 'string') return null;
+        const match = url.match(/pytron:\/\/([^?#]+)/);
+        return match ? match[1] : null;
+    };
+
+    const handlePytronAsset = async (el) => {
+        if (!el || !el.tagName) return;
+        const isLink = el.tagName === 'LINK';
+        const isScript = el.tagName === 'SCRIPT';
+        const attr = isLink ? 'href' : 'src';
+
+        const rawUrl = el.getAttribute(attr);
+        const key = getPytronKey(rawUrl) || getPytronKey(el[attr]);
+
+        if (key && !el.__pytron_loading) {
+            el.__pytron_loading = true;
+            try {
+                // console.log("[Pytron VAP] Reconciling asset key:", key, "for", el.tagName);
+                const assetBlob = await pytronApi.asset(key);
+                if (assetBlob) {
+                    const blobUrl = URL.createObjectURL(assetBlob);
+
+                    if (isScript) {
+                        // Scripts need to be recreated to execute
+                        const newScript = document.createElement('script');
+                        Array.from(el.attributes).forEach(a => {
+                            if (a.name !== 'src') newScript.setAttribute(a.name, a.value);
+                        });
+                        newScript.src = blobUrl;
+                        newScript.__pytron_loading = true;
+                        el.parentNode.replaceChild(newScript, el);
+                    } else {
+                        if (el.__pytron_blob_url) URL.revokeObjectURL(el.__pytron_blob_url);
+                        el.__pytron_blob_url = blobUrl;
+                        el[attr] = blobUrl;
+                    }
+                }
+            } catch (e) {
+                console.error("[Pytron VAP] DOM Asset load failed:", e);
+            } finally {
+                el.__pytron_loading = false;
+            }
+        }
+    };
+
+    const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+            if (mutation.type === 'childList') {
+                mutation.addedNodes.forEach(node => {
+                    if (node.tagName && ['IMG', 'SCRIPT', 'LINK'].includes(node.tagName)) handlePytronAsset(node);
+                    else if (node.querySelectorAll) {
+                        node.querySelectorAll('img, script, link').forEach(handlePytronAsset);
+                    }
+                });
+            } else if (mutation.type === 'attributes') {
+                if (mutation.target.tagName && ['IMG', 'SCRIPT', 'LINK'].includes(mutation.target.tagName)) {
+                    handlePytronAsset(mutation.target);
+                }
+            }
+        }
+    });
+
+    const startObserver = () => {
+        const target = document.documentElement || document.body;
+        if (target) {
+            observer.observe(target, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['src', 'href']
+            });
+            // Initial scan
+            document.querySelectorAll('img, script, link').forEach(handlePytronAsset);
+        } else {
+            // Retry if body not ready (unlikely at this stage but safe)
+            setTimeout(startObserver, 20);
+        }
+    };
+
+    if (document.readyState === 'loading') {
+        window.addEventListener('DOMContentLoaded', startObserver);
+    } else {
+        startObserver();
+    }
+
+    window.__pytron_dom_observer_active = true;
+}
+
 // 6. THE PROXY (Only for dynamic Python calls)
 const pytron = new Proxy(pytronApi, {
     get: (target, prop) => {
@@ -199,13 +312,13 @@ if (typeof window !== 'undefined') {
             try {
                 const initialState = await window.pytron_sync_state();
                 Object.assign(state, initialState);
-                
+
                 // --- DYNAMIC PLUGIN UI INJECTION ---
                 if (state.plugins && Array.isArray(state.plugins)) {
                     state.plugins.forEach(plugin => {
                         if (plugin.ui_entry) {
                             console.log(`[Pytron Client] Auto-loading Plugin UI: ${plugin.name} from ${plugin.ui_entry}`);
-                            
+
                             // 1. Inject Script
                             const scriptId = `pytron-plugin-${plugin.name}`;
                             if (!document.getElementById(scriptId)) {
@@ -214,7 +327,7 @@ if (typeof window !== 'undefined') {
                                 script.src = plugin.ui_entry;
                                 script.type = 'module';
                                 document.head.appendChild(script);
-                                
+
                                 // 2. Handle Auto-Slotted Components
                                 if (plugin.slot) {
                                     script.onload = () => {
@@ -270,7 +383,7 @@ if (typeof window !== 'undefined') {
         window.__pytron_loaded_plugins.add(plugin.name);
 
         console.log(`[Pytron Client] Loading UI for plugin: ${plugin.name} from ${plugin.ui_entry}`);
-        
+
         const script = document.createElement('script');
         script.src = plugin.ui_entry;
         script.type = 'module';
@@ -319,6 +432,19 @@ if (typeof window !== 'undefined') {
         }
     });
 
+    // IPC Queueing (Debounce Resize)
+    let resizeTimeout;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(() => {
+            // Only send RPC to Python when user STOPS resizing
+            // We publish this as a standard event which the backend can listen to if needed
+            if (pytron.publish) {
+                pytron.publish('window_resized', { width: window.innerWidth, height: window.innerHeight });
+            }
+        }, 100);
+    });
+
     // Global Drag & Drop Handler (Prevent browser navigation & dispatch to backend)
     // This allows the client library to manage file drops without backend injection
     window.addEventListener('dragover', (e) => e.preventDefault(), true);
@@ -360,10 +486,21 @@ if (typeof window !== 'undefined') {
 }
 
 // 7. ATTACH TO WINDOW
+// 7. ATTACH TO WINDOW
 if (typeof window !== 'undefined') {
-    window.pytron = pytron;
+    // Only assign if not already defined (Electron ContextBridge makes it readonly)
+    if (!window.pytron) {
+        window.pytron = pytron;
+    } else {
+        console.warn("[Pytron Client] window.pytron already exists (Electron Environment detected). Using native bridge.");
+        // If it exists, we might want to augment it or just leave it be.
+        // For strict Electron security, we leave the ContextBridge object alone.
+    }
+
     // Backwards compatibility for templates using pytronApi
-    window.pytronApi = pytronApi;
+    if (!window.pytronApi) {
+        window.pytronApi = pytronApi;
+    }
 }
 
 export default pytron;

@@ -1,6 +1,6 @@
 {
     "name": "pytron-client",
-    "version": "0.1.9",
+    "version": "0.2.0",
     "description": "Client library for Pytron",
     "type": "module",
     "main": "index.js",

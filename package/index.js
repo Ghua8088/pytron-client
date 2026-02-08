@@ -2,20 +2,22 @@
  * Pytron Client Library (Final Stable Version)
  */
 
-// 1. LOCAL STATE
-const state = {};
+const state = {
+    is_ready: true
+};
 
 // 2. BACKEND READINESS CHECK
 const isBackendReady = () => {
-    // Priority: Check the injected flag
-    if (window.pytron && window.pytron.is_ready) return true;
+    // Check for Native Bridge (Rust/Pytron Native Engine)
+    if (typeof window.__pytron_native_bridge === 'function') return true;
 
-    // Fallback: Check for a known bound function
+    // Check for legacy pytron object (Chrome Engine)
+    // IMPORTANT: We check if it's NOT the proxy to avoid infinite recursion
+    if (window.pytron && window.pytron.is_ready && !window.pytron.__is_proxy) return true;
+
+    // Fallback: Check for a known bound function (Legacy / Electron)
     const hasClose = typeof window.pytron_close === 'function';
     const hasDrag = typeof window.pytron_drag === 'function';
-
-    // DEBUG LOG ONLY (Remove in prod if needed, but useful now)
-    // console.log(`[Pytron Debug] Checking Backend: ready=${window.pytron?.is_ready}, hasClose=${hasClose}, hasDrag=${hasDrag}`);
 
     return typeof window !== 'undefined' && (hasClose || hasDrag);
 };
@@ -25,15 +27,25 @@ const waitForBackend = (timeout = 3000) => {
     return new Promise((resolve, reject) => {
         if (isBackendReady()) return resolve();
 
+        console.log("[Pytron] Waiting for backend...");
         const start = Date.now();
         const interval = setInterval(() => {
-            if (isBackendReady()) {
+            const ready = isBackendReady();
+            if (ready) {
+                console.log("[Pytron] Backend became ready after " + (Date.now() - start) + "ms");
                 clearInterval(interval);
                 resolve();
             } else if (Date.now() - start > timeout) {
+                console.warn("[Pytron] Backend wait timed out. Bridge missing?");
+                console.log("[Pytron Status]", {
+                    hasNative: typeof window.__pytron_native_bridge,
+                    hasPytron: !!window.pytron,
+                    isProxy: window.pytron?.__is_proxy,
+                    isReady: window.pytron?.is_ready,
+                    hasChromeIPC: !!window.chrome?.webview?.postMessage
+                });
                 clearInterval(interval);
-                console.warn("[Pytron] Backend wait timed out.");
-                resolve(); // resolve anyway to let the call proceed and fail naturally
+                resolve();
             }
         }, 50);
     });
@@ -46,6 +58,8 @@ const eventWrappers = new Map();
 // We define the API explicitly first.
 const pytronApi = {
     state: state,
+    is_ready: true,
+    __is_proxy: true,
 
     // Expose the wait function directly
     waitForBackend: waitForBackend,
@@ -266,39 +280,38 @@ const pytron = new Proxy(pytronApi, {
 
         // C. Python Bridge (Dynamic Wrapper)
         return async (...args) => {
-
             // 1. Wait for Backend (Using the standalone function)
             if (!isBackendReady()) {
                 await waitForBackend(2000);
             }
 
-            // 2. Execute Python Function
-            const internalName = `pytron_${String(prop)}`; // e.g. pytron_minimize
-            const directName = String(prop);                // e.g. greet
+            const directName = String(prop);
 
-            // Try Internal (pytron_*)
-            if (typeof window[internalName] === 'function') {
+            // Check bridge specifically
+            const nativeBridge = window.__pytron_native_bridge;
+            const hasNative = typeof nativeBridge === 'function';
+
+            if (hasNative) {
                 try {
-                    return await window[internalName](...args);
+                    return await nativeBridge(directName, args);
                 } catch (err) {
-                    console.error(`[Pytron] Internal error '${internalName}':`, err);
+                    console.error(`[Pytron Native] Error '${directName}':`, err);
                     throw err;
                 }
             }
 
-            // Try Direct
+            // Legacy/Chrome Checks
+            const internalName = `pytron_${String(prop)}`;
+            if (typeof window[internalName] === 'function') {
+                return await window[internalName](...args);
+            }
             if (typeof window[directName] === 'function') {
-                try {
-                    return await window[directName](...args);
-                } catch (err) {
-                    console.error(`[Pytron] Python error '${directName}':`, err);
-                    throw err;
-                }
+                return await window[directName](...args);
             }
 
             // 3. Not Found
-            console.warn(`[Pytron] Method '${String(prop)}' not found.`);
-            throw new Error(`Method '${String(prop)}' not found.`);
+            console.warn(`[Pytron] Method '${directName}' not found. Bridge Status: ${hasNative ? 'OK' : 'MISSING'}`);
+            throw new Error(`Method '${directName}' not found.`);
         };
     }
 });
@@ -307,10 +320,29 @@ const pytron = new Proxy(pytronApi, {
 if (typeof window !== 'undefined') {
     // Initial Sync
     (async () => {
-        await waitForBackend(2000);
-        if (typeof window.pytron_sync_state === 'function') {
-            try {
-                const initialState = await window.pytron_sync_state();
+        await waitForBackend(3000);
+
+        // Robust Sync: Try both the wrapper and the direct bridge
+        const performSync = async () => {
+            if (typeof window.pytron_sync_state === 'function') {
+                return await window.pytron_sync_state();
+            } else if (typeof window.__pytron_native_bridge === 'function') {
+                // Fallback to direct bridge if wrapper hasn't been created by event loop yet
+                return await window.__pytron_native_bridge('pytron_sync_state', []);
+            }
+            return null;
+        };
+
+        try {
+            let initialState = null;
+            // Retry briefly for initial discovery
+            for (let i = 0; i < 5; i++) {
+                initialState = await performSync();
+                if (initialState) break;
+                await new Promise(r => setTimeout(r, 100));
+            }
+
+            if (initialState) {
                 Object.assign(state, initialState);
 
                 // --- DYNAMIC PLUGIN UI INJECTION ---
@@ -318,38 +350,16 @@ if (typeof window !== 'undefined') {
                     state.plugins.forEach(plugin => {
                         if (plugin.ui_entry) {
                             console.log(`[Pytron Client] Auto-loading Plugin UI: ${plugin.name} from ${plugin.ui_entry}`);
-
-                            // 1. Inject Script
-                            const scriptId = `pytron-plugin-${plugin.name}`;
-                            if (!document.getElementById(scriptId)) {
-                                const script = document.createElement('script');
-                                script.id = scriptId;
-                                script.src = plugin.ui_entry;
-                                script.type = 'module';
-                                document.head.appendChild(script);
-
-                                // 2. Handle Auto-Slotted Components
-                                if (plugin.slot) {
-                                    script.onload = () => {
-                                        const slotContainers = document.querySelectorAll(`[data-pytron-slot="${plugin.slot}"]`);
-                                        slotContainers.forEach(container => {
-                                            const tagName = `${plugin.name}-widget`;
-                                            // Check if already injected in this container
-                                            if (!container.querySelector(tagName)) {
-                                                const el = document.createElement(tagName);
-                                                container.appendChild(el);
-                                            }
-                                        });
-                                    };
-                                }
-                            }
+                            injectPlugin(plugin);
                         }
                     });
                 }
 
                 // Dispatch event so UI components can update
                 window.dispatchEvent(new CustomEvent('pytron:state', { detail: { ...state } }));
-            } catch (e) { /* ignore */ }
+            }
+        } catch (e) {
+            console.warn("[Pytron Client] Initial state sync failed:", e);
         }
     })();
 
@@ -488,13 +498,17 @@ if (typeof window !== 'undefined') {
 // 7. ATTACH TO WINDOW
 // 7. ATTACH TO WINDOW
 if (typeof window !== 'undefined') {
-    // Only assign if not already defined (Electron ContextBridge makes it readonly)
-    if (!window.pytron) {
+    // Aggressive Assignment: We want our Proxy to be the primary window.pytron
+    // but we preserve any existing properties (like .id or .is_ready)
+    if (!window.pytron || !window.pytron.__is_proxy) {
+        const existing = window.pytron;
         window.pytron = pytron;
+        if (existing) {
+            Object.assign(pytronApi, existing);
+            if (existing.state) Object.assign(state, existing.state);
+        }
     } else {
-        console.warn("[Pytron Client] window.pytron already exists (Electron Environment detected). Using native bridge.");
-        // If it exists, we might want to augment it or just leave it be.
-        // For strict Electron security, we leave the ContextBridge object alone.
+        // console.log("[Pytron Client] Primary proxy already active.");
     }
 
     // Backwards compatibility for templates using pytronApi
